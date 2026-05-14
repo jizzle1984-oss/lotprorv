@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: lotprorv
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SCRAPERAPI_KEY
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: DB_PATH
+        value: ./lotprorv.db
+      - key: CRAWL_CONCURRENCY
+        value: 3
