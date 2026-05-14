@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LotProRV — RV Specs Database</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:#0b0d0e; --surf:#131618; --surf2:#1a1d21; --surf3:#22262b;
+  --border:rgba(255,255,255,.07); --border2:rgba(255,255,255,.12);
+  --accent:#f59e0b; --accent-lo:rgba(245,158,11,.1);
+  --text:#e8eaed; --text2:#9ca3af; --text3:#6b7280;
+  --ok:#10b981; --err:#ef4444; --warn:#f59e0b; --info:#3b82f6;
+  --r:8px; --r-sm:5px;
+  --mono:'DM Mono',monospace; --sans:'DM Sans',sans-serif;
+}
+* { box-sizing:border-box; margin:0; padding:0; }
+body { background:var(--bg); color:var(--text); font-family:var(--sans); font-size:14px; line-height:1.55; min-height:100vh; display:flex; flex-direction:column; }
+button { font-family:var(--sans); cursor:pointer; }
+input, select { font-family:var(--sans); background:var(--surf2); border:1px solid var(--border); color:var(--text); border-radius:var(--r-sm); outline:none; transition:border-color .15s; }
+input:focus, select:focus { border-color:var(--accent); }
+input::placeholder { color:var(--text3); }
+select option { background:var(--surf2); }
+::-webkit-scrollbar { width:5px; height:5px; }
+::-webkit-scrollbar-thumb { background:var(--border2); border-radius:9px; }
+@keyframes fadeUp { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+@keyframes shimmer { to { background-position:-200% 0; } }
+@keyframes spin { to { transform:rotate(360deg); } }
+.fade { animation:fadeUp .3s ease both; }
+.sk { background:linear-gradient(90deg,var(--surf) 25%,var(--surf2) 50%,var(--surf) 75%); background-size:200% 100%; animation:shimmer 1.4s infinite; border-radius:var(--r-sm); }
+</style>
+</head>
+<body>
+<div id="app" style="display:flex;flex-direction:column;min-height:100vh">
+  <header style="background:var(--surf);border-bottom:1px solid var(--border);padding:0 24px;height:54px;display:flex;align-items:center;gap:24px;position:sticky;top:0;z-index:100;flex-shrink:0">
+    <div onclick="showPage('browse')" style="font-family:'Bebas Neue',sans-serif;font-size:28px;letter-spacing:2px;color:var(--accent);cursor:pointer;line-height:1">
+      LotPro<span style="color:var(--text3);font-size:20px">RV</span>
+    </div>
+    <nav id="nav" style="display:flex;gap:4px;margin-left:auto"></nav>
+  </header>
+  <main id="main" style="flex:1;max-width:1400px;width:100%;margin:0 auto;padding:0 24px 64px"></main>
+  <div id="toasts" style="position:fixed;bottom:20px;right:20px;z-index:999;display:flex;flex-direction:column;gap:8px"></div>
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+var page = 'browse';
+var selId = null;
+var adminPw = '';
+var filters = { q:'', make:'', year:'', rv_type:'', min_length:'', max_length:'', sleeps:'', slides:'' };
+var bPage = 0;
+var metaCache = { makes:[], rv_types:[] };
+var PAGE_SZ = 40;
+var sseSource = null;
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+function num(n) { return n == null ? '—' : Number(n).toLocaleString(); }
+function esc(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+async function apiFetch(path, opts) {
+  opts = opts || {};
+  var r = await fetch('/api' + path, opts);
+  if (!r.ok) {
+    var e = await r.json().catch(function() { return { error: r.statusText }; });
+    throw new Error(e.error || 'API error');
+  }
+  return r.json();
+}
+
+function adminHeaders() {
+  return { 'Content-Type':'application/json', 'X-Admin-Password': adminPw };
+}
+
+function toast(msg, type) {
+  type = type || 'info';
+  var w = document.getElementById('toasts');
+  var d = document.createElement('div');
+  var col = type === 'success' ? 'var(--ok)' : type === 'error' ? 'var(--err)' : type === 'warn' ? 'var(--warn)' : 'var(--info)';
+  d.style.cssText = 'background:var(--surf2);border-left:3px solid ' + col + ';border-radius:var(--r-sm);padding:10px 16px;font-size:13px;max-width:340px;box-shadow:0 4px 16px rgba(0,0,0,.4)';
+  d.textContent = msg;
+  w.appendChild(d);
+  setTimeout(function() { d.style.opacity = '0'; d.style.transition = 'opacity .3s'; setTimeout(function() { d.remove(); }, 300); }, 3500);
+}
+
+// ── Navigation ────────────────────────────────────────────────────────────────
+function renderNav() {
+  var isAdmin = page === 'admin';
+  document.getElementById('nav').innerHTML =
+    navBtn('browse', 'Browse', !isAdmin) +
+    navBtn('admin', 'Admin', isAdmin);
+}
+
+function navBtn(id, label, active) {
+  return '<button onclick="showPage(\'' + id + '\')" style="padding:5px 14px;border-radius:var(--r-sm);border:none;font-size:12px;font-weight:500;letter-spacing:.5px;text-transform:uppercase;color:' + (active ? 'var(--accent)' : 'var(--text3)') + ';background:' + (active ? 'var(--surf2)' : 'none') + '">' + label + '</button>';
+}
+
+function showPage(p, id) {
+  page = p;
+  if (id !== undefined) selId = id;
+  renderNav();
+  document.getElementById('main').innerHTML = '';
+  if (p === 'browse') renderBrowse();
+  else if (p === 'detail') renderDetail(selId);
+  else if (p === 'admin') adminPw ? renderAdmin() : renderAdminAuth();
+}
+
+// ── Browse ────────────────────────────────────────────────────────────────────
+async function renderBrowse() {
+  var m = document.getElementById('main');
+  if (!metaCache.makes.length) {
+    try { metaCache = await apiFetch('/meta'); } catch(e) {}
+  }
+
+  var makeOpts = '<option value="">All Makes</option>' + metaCache.makes.map(function(mk) {
+    return '<option value="' + esc(mk) + '"' + (filters.make === mk ? ' selected' : '') + '>' + esc(mk) + '</option>';
+  }).join('');
+
+  var typeOpts = '<option value="">All Types</option>' + metaCache.rv_types.map(function(t) {
+    return '<option value="' + esc(t) + '"' + (filters.rv_type === t ? ' selected' : '') + '>' + esc(t) + '</option>';
+  }).join('');
+
+  var yearOpts = '<option value="">All Years</option>';
+  for (var y = new Date().getFullYear() + 1; y >= 1990; y--) {
+    yearOpts += '<option value="' + y + '"' + (filters.year == y ? ' selected' : '') + '>' + y + '</option>';
+  }
+
+  m.innerHTML = [
+    '<div style="padding:36px 0 24px;border-bottom:1px solid var(--border);margin-bottom:24px">',
+      '<h1 style="font-family:\'Bebas Neue\',sans-serif;font-size:52px;letter-spacing:3px;line-height:1;margin-bottom:4px">',
+        'FIND YOUR <span style="color:var(--accent)">RIG</span>',
+      '</h1>',
+      '<p style="color:var(--text3);font-size:13px;margin-bottom:22px">Structured specs database for RV sales professionals</p>',
+      '<div style="display:flex;gap:10px;max-width:560px">',
+        '<input id="b-q" value="' + esc(filters.q) + '" placeholder="Search make, model, floorplan..." style="flex:1;padding:10px 14px;font-size:14px" oninput="filters.q=this.value;debSearch()" onkeydown="if(event.key===\'Enter\')doSearch()">',
+        '<button onclick="doSearch()" style="background:var(--accent);color:#000;border:none;border-radius:var(--r-sm);padding:10px 22px;font-weight:600;font-size:14px">Search</button>',
+      '</div>',
+    '</div>',
+    '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px;align-items:flex-end">',
+      fgrp('Make', '<select onchange="filters.make=this.value;doSearch()" style="padding:7px 10px;font-size:13px">' + makeOpts + '</select>'),
+      fgrp('Year', '<select onchange="filters.year=this.value;doSearch()" style="padding:7px 10px;font-size:13px">' + yearOpts + '</select>'),
+      fgrp('RV Type', '<select onchange="filters.rv_type=this.value;doSearch()" style="padding:7px 10px;font-size:13px">' + typeOpts + '</select>'),
+      fgrp('Min Len', '<input type="number" value="' + esc(filters.min_length) + '" placeholder="ft" style="width:80px;padding:7px 10px;font-size:13px" oninput="filters.min_length=this.value;debSearch()">'),
+      fgrp('Max Len', '<input type="number" value="' + esc(filters.max_length) + '" placeholder="ft" style="width:80px;padding:7px 10px;font-size:13px" oninput="filters.max_length=this.value;debSearch()">'),
+      fgrp('Min Sleeps', '<input type="number" value="' + esc(filters.sleeps) + '" placeholder="e.g. 4" style="width:80px;padding:7px 10px;font-size:13px" oninput="filters.sleeps=this.value;debSearch()">'),
+      fgrp('Min Slides', '<input type="number" value="' + esc(filters.slides) + '" placeholder="e.g. 2" style="width:80px;padding:7px 10px;font-size:13px" oninput="filters.slides=this.value;debSearch()">'),
+      '<button onclick="clearFilters()" style="background:none;border:1px solid var(--border);color:var(--text3);border-radius:var(--r-sm);padding:7px 12px;font-size:12px">Clear</button>',
+    '</div>',
+    '<div id="results-area"></div>'
+  ].join('');
+
+  doSearch();
+}
+
+function fgrp(label, inner) {
+  return '<div style="display:flex;flex-direction:column;gap:4px"><label style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text3);font-weight:600">' + label + '</label>' + inner + '</div>';
+}
+
+var debTimer = null;
+function debSearch() { clearTimeout(debTimer); debTimer = setTimeout(doSearch, 350); }
+function clearFilters() {
+  filters = { q:'', make:'', year:'', rv_type:'', min_length:'', max_length:'', sleeps:'', slides:'' };
+  bPage = 0;
+  renderBrowse();
+}
+
+async function doSearch(offset) {
+  if (offset !== undefined) bPage = Math.floor(offset / PAGE_SZ);
+  var el = document.getElementById('results-area');
+  if (!el) return;
+  var skels = '';
+  for (var i = 0; i < 6; i++) skels += '<div class="sk" style="height:200px"></div>';
+  el.innerHTML = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:12px">' + skels + '</div>';
+
+  try {
+    var params = new URLSearchParams();
+    var f = Object.assign({}, filters, { limit: PAGE_SZ, offset: bPage * PAGE_SZ });
+    Object.keys(f).forEach(function(k) { if (f[k] != null && f[k] !== '') params.set(k, f[k]); });
+    var data = await apiFetch('/floorplans?' + params.toString());
+    renderResults(data);
+  } catch(e) {
+    el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--err)">Error: ' + esc(e.message) + '</div>';
+  }
+}
+
+function renderResults(data) {
+  var rows = data.rows, total = data.total;
+  var el = document.getElementById('results-area');
+  if (!el) return;
+  var pages = Math.ceil(total / PAGE_SZ);
+
+  var html = '<div style="font-size:13px;color:var(--text3);margin-bottom:14px"><strong style="color:var(--text)">' + total.toLocaleString() + '</strong> floorplans' + (total === 0 ? ' — go to Admin and run a crawl to import data' : '') + '</div>';
+
+  if (!rows.length) {
+    html += '<div style="text-align:center;padding:80px 0;color:var(--text3)"><div style="font-size:48px;margin-bottom:12px">&#x1F690;</div><div style="font-size:20px;color:var(--text);margin-bottom:8px">No results</div><p style="font-size:13px">Go to Admin and trigger a crawl to start importing RV specs</p></div>';
+  } else {
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:12px">';
+    rows.forEach(function(fp, i) {
+      var conf = Math.round((fp.parse_confidence || 0) * 100);
+      var cCol = conf >= 80 ? 'var(--ok)' : conf >= 50 ? 'var(--warn)' : 'var(--err)';
+      html += '<div onclick="showPage(\'detail\',' + fp.id + ')" class="fade" '
+        + 'style="background:var(--surf);border:1px solid var(--border);border-radius:var(--r);padding:16px;cursor:pointer;transition:all .15s;animation-delay:' + (i*20) + 'ms;position:relative;overflow:hidden" '
+        + 'onmouseenter="this.style.borderColor=\'var(--accent)\';this.style.transform=\'translateY(-2px)\'" '
+        + 'onmouseleave="this.style.borderColor=\'var(--border)\';this.style.transform=\'none\'">'
+        + '<div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,' + cCol + ' ' + conf + '%,var(--border) 0)"></div>'
+        + '<div style="font-size:10px;text-transform:uppercase;letter-spacing:2px;color:var(--accent);font-weight:600;margin-bottom:3px">' + (fp.year || '—') + '</div>'
+        + '<div style="font-size:16px;font-weight:600;margin-bottom:2px">' + esc(fp.make) + ' ' + esc(fp.model) + '</div>'
+        + '<div style="font-size:12px;color:var(--text3);margin-bottom:10px">' + esc(fp.floorplan || 'Base Floorplan') + '</div>'
+        + (fp.rv_type ? '<span style="display:inline-block;padding:2px 8px;border-radius:99px;font-size:10px;font-weight:600;background:var(--surf2);color:var(--text3);margin-bottom:10px">' + esc(fp.rv_type) + '</span>' : '')
+        + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;border-top:1px solid var(--border);padding-top:10px">'
+        + sm('Length', fp.length_ft ? fp.length_ft + "'" : null)
+        + sm('Dry Wt', fp.dry_weight_lbs ? num(fp.dry_weight_lbs) + ' lbs' : null)
+        + sm('Sleeps', fp.sleep_capacity)
+        + sm('MSRP', fp.msrp ? '$' + num(fp.msrp) : null)
+        + '</div>'
+        + '<div style="margin-top:10px;display:flex;align-items:center;gap:8px">'
+        + '<div style="flex:1;height:3px;background:var(--surf3);border-radius:99px;overflow:hidden"><div style="width:' + conf + '%;height:100%;background:' + cCol + ';border-radius:99px"></div></div>'
+        + '<span style="font-size:10px;font-family:var(--mono);color:var(--text3)">' + conf + '%</span>'
+        + '</div></div>';
+    });
+    html += '</div>';
+  }
+
+  if (pages > 1) {
+    html += '<div style="display:flex;justify-content:center;gap:6px;margin-top:28px">';
+    if (bPage > 0) html += pBtn('&larr; Prev', (bPage - 1) * PAGE_SZ);
+    for (var p = Math.max(0, bPage-2); p <= Math.min(pages-1, bPage+2); p++) {
+      html += '<button onclick="doSearch(' + (p * PAGE_SZ) + ')" style="padding:5px 12px;border-radius:var(--r-sm);border:none;background:' + (p === bPage ? 'var(--accent)' : 'var(--surf2)') + ';color:' + (p === bPage ? '#000' : 'var(--text)') + ';font-size:12px">' + (p + 1) + '</button>';
+    }
+    if (bPage < pages - 1) html += pBtn('Next &rarr;', (bPage + 1) * PAGE_SZ);
+    html += '</div>';
+  }
+
+  el.innerHTML = html;
+}
+
+function sm(l, v) {
+  return '<div><div style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text3)">' + l + '</div>'
+    + '<div style="font-size:13px;font-family:var(--mono);font-weight:500;color:' + (v != null ? 'var(--text)' : 'var(--text3)') + '">' + (v != null ? v : '—') + '</div></div>';
+}
+function pBtn(l, o) {
+  return '<button onclick="doSearch(' + o + ')" style="padding:5px 12px;border-radius:var(--r-sm);border:1px solid var(--border);background:var(--surf);color:var(--text);font-size:12px">' + l + '</button>';
+}
+
+// ── Detail ────────────────────────────────────────────────────────────────────
+async function renderDetail(id) {
+  var m = document.getElementById('main');
+  m.innerHTML = '<div style="padding:40px;text-align:center"><div style="display:inline-block;width:32px;height:32px;border:2px solid var(--border2);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite"></div></div>';
+  try {
+    var fp = await apiFetch('/floorplans/' + id);
+    var conf = Math.round((fp.parse_confidence || 0) * 100);
+    var cCol = conf >= 80 ? 'var(--ok)' : conf >= 50 ? 'var(--warn)' : 'var(--err)';
+    var features = Array.isArray(fp.features) ? fp.features : [];
+
+    var html = '<div class="fade">'
+      + '<button onclick="showPage(\'browse\')" style="display:flex;align-items:center;gap:6px;color:var(--text3);background:none;border:none;font-size:13px;margin:20px 0 18px;padding:0" onmouseenter="this.style.color=\'var(--accent)\'" onmouseleave="this.style.color=\'var(--text3)\'">&#8592; Back to results</button>'
+      + '<div style="margin-bottom:28px;padding-bottom:24px;border-bottom:1px solid var(--border)">'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">'
+      + (fp.rv_type ? badge(fp.rv_type, 'var(--accent-lo)', 'var(--accent)') : '')
+      + badge(fp.year || '—', 'var(--surf2)', 'var(--text3)')
+      + '</div>'
+      + '<h1 style="font-family:\'Bebas Neue\',sans-serif;font-size:46px;letter-spacing:2px;line-height:1.05;margin-bottom:6px">' + esc(fp.make) + ' ' + esc(fp.model) + '</h1>'
+      + '<div style="color:var(--text3);font-size:15px;margin-bottom:12px">' + esc(fp.floorplan || 'Base Floorplan') + '</div>'
+      + (fp.msrp ? '<div style="font-size:28px;font-weight:700;color:var(--accent);font-family:var(--mono)">$' + num(fp.msrp) + ' MSRP</div>' : '')
+      + '<div style="margin-top:14px;max-width:280px">'
+      + '<div style="font-size:11px;color:var(--text3);margin-bottom:4px">Parse confidence</div>'
+      + '<div style="display:flex;align-items:center;gap:8px">'
+      + '<div style="flex:1;height:5px;background:var(--surf3);border-radius:99px;overflow:hidden"><div style="width:' + conf + '%;height:100%;background:' + cCol + ';border-radius:99px"></div></div>'
+      + '<span style="font-size:12px;font-family:var(--mono);color:var(--text3)">' + conf + '%</span>'
+      + '</div></div></div>'
+      + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px">'
+      + sCard('Dimensions', [['Overall Length', fp.length_ft, function(v){return v+"'";}], ['Overall Width', fp.width_ft, function(v){return v+"'";}], ['Overall Height', fp.height_ft, function(v){return v+"'";}]])
+      + sCard('Weights', [['Dry Weight (UVW)', fp.dry_weight_lbs, function(v){return num(v)+' lbs';}], ['GVWR', fp.gvwr_lbs, function(v){return num(v)+' lbs';}], ['Hitch Weight', fp.hitch_weight_lbs, function(v){return num(v)+' lbs';}], ['Pin Weight', fp.pin_weight_lbs, function(v){return num(v)+' lbs';}], ['Payload', fp.payload_lbs, function(v){return num(v)+' lbs';}]])
+      + sCard('Tanks', [['Fresh Water', fp.fresh_water_gal, function(v){return v+' gal';}], ['Gray Water', fp.gray_water_gal, function(v){return v+' gal';}], ['Black Water', fp.black_water_gal, function(v){return v+' gal';}], ['Fuel', fp.fuel_gal, function(v){return v+' gal';}], ['LP Propane', fp.lp_lbs, function(v){return v+' lbs';}]])
+      + sCard('Living', [['Sleeping Capacity', fp.sleep_capacity, function(v){return String(v);}], ['Slide-Outs', fp.slides_count, function(v){return String(v);}]])
+      + (fp.engine ? sCard('Powertrain', [['Engine', fp.engine, function(v){return v;}], ['Horsepower', fp.horsepower, function(v){return v+' hp';}], ['Transmission', fp.transmission, function(v){return v;}], ['Chassis', fp.chassis, function(v){return v;}]]) : '');
+
+    if (features.length) {
+      html += '<div style="background:var(--surf);border:1px solid var(--border);border-radius:var(--r);overflow:hidden">'
+        + '<div style="padding:10px 16px;background:var(--surf2);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;color:var(--text3);border-bottom:1px solid var(--border)">Features</div>'
+        + '<div style="padding:14px 16px;display:flex;flex-direction:column;gap:6px">'
+        + features.map(function(f) { return '<div style="display:flex;gap:8px;font-size:13px"><span style="color:var(--accent);font-weight:700;flex-shrink:0">&#8250;</span><span>' + esc(f) + '</span></div>'; }).join('')
+        + '</div></div>';
+    }
+
+    if (fp.parse_notes) {
+      html += '<div style="grid-column:1/-1;background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.2);border-radius:var(--r);padding:12px 16px;font-size:13px;color:var(--warn)"><strong style="display:block;margin-bottom:4px">Parse notes</strong>' + esc(fp.parse_notes) + '</div>';
+    }
+
+    html += '<div style="grid-column:1/-1;font-size:11px;color:var(--text3);font-family:var(--mono)">Source: <a href="' + fp.source_url + '" target="_blank" style="color:var(--accent)">' + fp.source_url + '</a> &middot; Scraped ' + (fp.scraped_at || '').slice(0, 10) + '</div>';
+    html += '</div></div>';
+    m.innerHTML = html;
+  } catch(e) {
+    m.innerHTML = '<div style="padding:40px;text-align:center;color:var(--err)">Error: ' + esc(e.message) + '</div>';
+  }
+}
+
+function badge(txt, bg, col) {
+  return '<span style="display:inline-block;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:600;background:' + bg + ';color:' + col + '">' + esc(String(txt)) + '</span>';
+}
+
+function sCard(title, rows) {
+  var vis = rows.filter(function(r) { return r[1] != null; });
+  if (!vis.length) return '';
+  return '<div style="background:var(--surf);border:1px solid var(--border);border-radius:var(--r);overflow:hidden">'
+    + '<div style="padding:10px 16px;background:var(--surf2);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;color:var(--text3);border-bottom:1px solid var(--border)">' + title + '</div>'
+    + rows.map(function(r) {
+        var label = r[0], val = r[1], fmt = r[2];
+        return '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 16px;border-bottom:1px solid var(--border);gap:16px">'
+          + '<span style="font-size:12px;color:var(--text3)">' + label + '</span>'
+          + '<span style="font-family:var(--mono);font-size:12px;font-weight:500;color:' + (val != null ? 'var(--text)' : 'var(--text3)') + ';font-style:' + (val == null ? 'italic' : 'normal') + '">'
+          + (val != null ? (fmt ? fmt(val) : val) : 'N/A') + '</span></div>';
+      }).join('')
+    + '</div>';
+}
+
+// ── Admin Auth ────────────────────────────────────────────────────────────────
+function renderAdminAuth() {
+  document.getElementById('main').innerHTML =
+    '<div class="fade" style="max-width:360px;margin:70px auto;background:var(--surf);border:1px solid var(--border);border-radius:var(--r);padding:32px;text-align:center">'
+    + '<div style="font-family:\'Bebas Neue\',sans-serif;font-size:36px;letter-spacing:2px;margin-bottom:6px">ADMIN</div>'
+    + '<p style="color:var(--text3);font-size:13px;margin-bottom:24px">Enter your admin password</p>'
+    + '<div style="display:flex;flex-direction:column;gap:10px">'
+    + '<input type="password" id="pw-in" placeholder="Admin password" style="padding:10px 14px;font-size:14px;width:100%" onkeydown="if(event.key===\'Enter\')tryLogin()">'
+    + '<button onclick="tryLogin()" style="background:var(--accent);color:#000;border:none;border-radius:var(--r-sm);padding:10px;font-weight:600;font-size:14px">Enter</button>'
+    + '<div id="auth-err" style="color:var(--err);font-size:12px;display:none">Incorrect password</div>'
+    + '</div></div>';
+}
+
+async function tryLogin() {
+  var v = document.getElementById('pw-in') ? document.getElementById('pw-in').value : '';
+  try {
+    await apiFetch('/admin/auth-check', { headers: { 'X-Admin-Password': v } });
+    adminPw = v;
+    renderAdmin();
+  } catch(e) {
+    document.getElementById('auth-err').style.display = 'block';
+  }
+}
+
+// ── Admin Dashboard ───────────────────────────────────────────────────────────
+async function renderAdmin() {
+  page = 'admin'; renderNav();
+  var m = document.getElementById('main');
+  var stats = { floorplans:{ total:0, byType:[], byMake:[], lowConf:0 }, urls:[] };
+  var runs = [], errors = [], logs = [];
+  try {
+    var results = await Promise.all([
+      apiFetch('/stats'),
+      apiFetch('/admin/runs', { headers: adminHeaders() }),
+      apiFetch('/admin/errors', { headers: adminHeaders() }),
+      apiFetch('/admin/logs', { headers: adminHeaders() })
+    ]);
+    stats = results[0]; runs = results[1]; errors = results[2]; logs = results[3];
+  } catch(e) {}
+
+  var uc = {};
+  stats.urls.forEach(function(u) { uc[u.status] = (uc[u.status] || 0) + u.count; });
+
+  m.innerHTML = '<div class="fade">'
+    + '<div style="display:flex;align-items:flex-end;justify-content:space-between;padding-top:24px;margin-bottom:24px;padding-bottom:20px;border-bottom:1px solid var(--border)">'
+    + '<h1 style="font-family:\'Bebas Neue\',sans-serif;font-size:40px;letter-spacing:2px;line-height:1">ADMIN <span style="color:var(--accent)">PANEL</span></h1>'
+    + '<button onclick="renderAdmin()" style="background:none;border:1px solid var(--border);color:var(--text3);border-radius:var(--r-sm);padding:6px 14px;font-size:12px">&#8635; Refresh</button>'
+    + '</div>'
+    + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px;margin-bottom:28px">'
+    + tile('Floorplans', stats.floorplans.total, 'var(--accent)')
+    + tile('Low Conf', stats.floorplans.lowConf, 'var(--warn)')
+    + tile('Makes', stats.floorplans.byMake.length, 'var(--info)')
+    + tile('URLs Done', uc.done || 0, 'var(--ok)')
+    + tile('Pending', uc.pending || 0, 'var(--text3)')
+    + tile('Errors', uc.error || 0, 'var(--err)')
+    + '</div>'
+    + '<div style="display:flex;border-bottom:1px solid var(--border);margin-bottom:20px" id="adm-tabs">'
+    + aTab('ov', 'Overview', true) + aTab('cr', 'Crawl', false) + aTab('er', 'Errors (' + errors.length + ')', false) + aTab('lg', 'Logs', false)
+    + '</div>'
+    + '<div id="adm-body"></div></div>';
+
+  window._ad = { stats:stats, runs:runs, errors:errors, logs:logs,
+    maxT: stats.floorplans.byType[0] ? stats.floorplans.byType[0].c : 1,
+    maxM: stats.floorplans.byMake[0] ? stats.floorplans.byMake[0].c : 1 };
+  showATab('ov');
+  startSSE();
+}
+
+function tile(label, val, color) {
+  return '<div style="background:var(--surf);border:1px solid var(--border);border-radius:var(--r);padding:14px;text-align:center">'
+    + '<div style="font-family:var(--mono);font-size:24px;font-weight:500;color:' + color + '">' + num(val) + '</div>'
+    + '<div style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text3);margin-top:4px">' + label + '</div>'
+    + '</div>';
+}
+
+function aTab(id, label, active) {
+  return '<button onclick="showATab(\'' + id + '\')" id="at-' + id + '" style="padding:8px 18px;font-size:13px;border:none;cursor:pointer;background:none;font-family:var(--sans);font-weight:500;color:' + (active ? 'var(--accent)' : 'var(--text3)') + ';border-bottom:2px solid ' + (active ? 'var(--accent)' : 'transparent') + ';margin-bottom:-1px">' + label + '</button>';
+}
+
+function showATab(id) {
+  document.querySelectorAll('[id^="at-"]').forEach(function(b) {
+    var a = b.id === 'at-' + id;
+    b.style.color = a ? 'var(--accent)' : 'var(--text3)';
+    b.style.borderBottomColor = a ? 'var(--accent)' : 'transparent';
+  });
+  var d = window._ad || {};
+  var body = document.getElementById('adm-body');
+  if (!body) return;
+
+  if (id === 'ov') {
+    var byType = (d.stats && d.stats.floorplans && d.stats.floorplans.byType) ? d.stats.floorplans.byType : [];
+    var byMake = (d.stats && d.stats.floorplans && d.stats.floorplans.byMake) ? d.stats.floorplans.byMake : [];
+    body.innerHTML = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">'
+      + surf('By RV Type', byType.map(function(r) { return bRow(r.rv_type || 'Unknown', r.c, d.maxT); }).join(''))
+      + surf('Top Makes', byMake.map(function(r) { return bRow(r.make || 'Unknown', r.c, d.maxM); }).join(''))
+      + '</div>';
+
+  } else if (id === 'cr') {
+    var runs = d.runs || [];
+    var runsHtml = runs.length ? runs.map(function(r) {
+      return '<div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--surf2);border-radius:var(--r-sm);margin-bottom:6px;flex-wrap:wrap">'
+        + '<span style="font-family:var(--mono);font-size:11px;color:var(--text3);width:28px">#' + r.id + '</span>'
+        + '<span style="padding:2px 8px;border-radius:99px;font-size:10px;font-weight:600;background:' + (r.status === 'done' ? 'rgba(16,185,129,.1)' : 'rgba(245,158,11,.1)') + ';color:' + (r.status === 'done' ? 'var(--ok)' : 'var(--warn)') + '">' + r.status + '</span>'
+        + '<span style="font-size:12px;flex:1">' + r.trigger + (r.scope ? ' &mdash; ' + r.scope : '') + '</span>'
+        + '<span style="font-size:11px;color:var(--text3)">+' + r.records_added + ' added &middot; ' + r.urls_crawled + ' crawled</span>'
+        + '</div>';
+    }).join('') : '<div style="color:var(--text3);font-size:13px;text-align:center;padding:20px">No runs yet</div>';
+
+    body.innerHTML = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">'
+      + surf('Trigger Crawl',
+          '<div style="display:flex;flex-direction:column;gap:12px">'
+          + '<button onclick="triggerCrawl(\'full\')" style="background:var(--accent);color:#000;border:none;border-radius:var(--r-sm);padding:10px;font-weight:600;font-size:13px">&#9654; Full Crawl &mdash; All Makes</button>'
+          + '<hr style="border:none;border-top:1px solid var(--border)">'
+          + '<label style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text3)">Make Name</label>'
+          + '<input id="cr-make" placeholder="e.g. Forest River" style="padding:8px 12px;font-size:13px">'
+          + '<button onclick="triggerCrawl(\'make\')" style="background:none;border:1px solid var(--border);color:var(--text);border-radius:var(--r-sm);padding:8px;font-size:13px">&#9654; Crawl by Make</button>'
+          + '<hr style="border:none;border-top:1px solid var(--border)">'
+          + '<label style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text3)">Specific URL</label>'
+          + '<input id="cr-url" placeholder="https://www.rvusa.com/rv-guide/..." style="padding:8px 12px;font-size:13px">'
+          + '<button onclick="triggerCrawl(\'url\')" style="background:none;border:1px solid var(--border);color:var(--text);border-radius:var(--r-sm);padding:8px;font-size:13px">&#9654; Crawl URL</button>'
+          + '<hr style="border:none;border-top:1px solid var(--border)">'
+          + '<button onclick="requeueErrors()" style="background:var(--err);color:#fff;border:none;border-radius:var(--r-sm);padding:7px;font-size:12px">&#8635; Requeue All Errors</button>'
+          + '</div>')
+      + surf('Live Feed', '<div id="live-feed" style="max-height:340px;overflow-y:auto;font-size:11px;font-family:var(--mono)"><span style="color:var(--text3);display:block;padding:20px 0;text-align:center">Start a crawl to see live logs</span></div>')
+      + '<div style="grid-column:1/-1">' + surf('Run History', runsHtml) + '</div>'
+      + '</div>';
+
+  } else if (id === 'er') {
+    var errors = d.errors || [];
+    var errHtml = errors.length ? '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">'
+      + '<thead><tr>' + ['URL','Type','HTTP','Retries','Error'].map(function(h) { return '<th style="padding:8px 12px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text3);background:var(--surf2);border-bottom:1px solid var(--border)">' + h + '</th>'; }).join('') + '</tr></thead>'
+      + '<tbody>' + errors.map(function(r) {
+          return '<tr style="border-bottom:1px solid var(--border)">'
+            + '<td style="padding:8px 12px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="' + r.url + '" target="_blank" style="color:var(--accent)">' + r.url + '</a></td>'
+            + '<td style="padding:8px 12px">' + r.type + '</td>'
+            + '<td style="padding:8px 12px">' + (r.http_status || '—') + '</td>'
+            + '<td style="padding:8px 12px">' + r.retry_count + '</td>'
+            + '<td style="padding:8px 12px;color:var(--err);max-width:200px">' + esc(r.error || '') + '</td>'
+            + '</tr>';
+        }).join('') + '</tbody></table></div>'
+      : '<div style="text-align:center;padding:32px;color:var(--text3)">No errors</div>';
+    body.innerHTML = surf('Error URLs', errHtml);
+
+  } else if (id === 'lg') {
+    var logs = d.logs || [];
+    var logHtml = logs.length ? logs.map(function(l) {
+      var col = { info:'var(--text2)', warn:'var(--warn)', error:'var(--err)', debug:'var(--text3)' }[l.level] || 'var(--text)';
+      return '<div style="display:grid;grid-template-columns:52px 44px 1fr;gap:8px;padding:5px 12px;border-bottom:1px solid var(--border);font-size:11px;font-family:var(--mono)">'
+        + '<span style="color:var(--text3)">' + (l.created_at || '').slice(11,16) + '</span>'
+        + '<span style="color:' + col + '">' + l.level.toUpperCase() + '</span>'
+        + '<span style="word-break:break-all">' + esc(l.message) + (l.url ? '<span style="display:block;color:var(--text3);font-size:10px">' + esc(l.url) + '</span>' : '') + '</span>'
+        + '</div>';
+    }).join('') : '<div style="color:var(--text3);font-size:13px;text-align:center;padding:20px">No logs yet</div>';
+    body.innerHTML = surf('Recent Logs', logHtml);
+  }
+}
+
+function surf(title, inner) {
+  return '<div style="background:var(--surf);border:1px solid var(--border);border-radius:var(--r);overflow:hidden">'
+    + '<div style="padding:10px 16px;background:var(--surf2);font-size:12px;font-weight:600;border-bottom:1px solid var(--border)">' + title + '</div>'
+    + '<div style="padding:14px 16px">' + inner + '</div></div>';
+}
+
+function bRow(label, val, max) {
+  var p = Math.round(val / max * 100);
+  return '<div style="margin-bottom:8px">'
+    + '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px"><span style="color:var(--text2)">' + esc(label) + '</span><span style="font-family:var(--mono);font-size:11px">' + val + '</span></div>'
+    + '<div style="height:4px;background:var(--surf3);border-radius:99px;overflow:hidden"><div style="width:' + p + '%;height:100%;background:var(--accent);border-radius:99px"></div></div>'
+    + '</div>';
+}
+
+async function triggerCrawl(type) {
+  var body = {};
+  if (type === 'make') {
+    var v = document.getElementById('cr-make') ? document.getElementById('cr-make').value.trim() : '';
+    if (!v) { toast('Enter a make name', 'warn'); return; }
+    body = { make: v };
+  }
+  if (type === 'url') {
+    var v2 = document.getElementById('cr-url') ? document.getElementById('cr-url').value.trim() : '';
+    if (!v2) { toast('Enter a URL', 'warn'); return; }
+    body = { url: v2 };
+  }
+  try {
+    await apiFetch('/admin/crawl', { method:'POST', headers: adminHeaders(), body: JSON.stringify(body) });
+    toast('Crawl started — watch the live feed', 'success');
+  } catch(e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+async function requeueErrors() {
+  try {
+    await apiFetch('/admin/requeue-errors', { method:'POST', headers: adminHeaders() });
+    toast('Errors requeued', 'success');
+    renderAdmin();
+  } catch(e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+function startSSE() {
+  if (sseSource) sseSource.close();
+  sseSource = new EventSource('/api/admin/crawl/stream?admin_password=' + encodeURIComponent(adminPw));
+  sseSource.onmessage = function(e) {
+    var d = JSON.parse(e.data);
+    if (d.idle) return;
+    var feed = document.getElementById('live-feed');
+    if (!feed) return;
+    if (d.recentLogs && d.recentLogs.length) {
+      feed.innerHTML = d.recentLogs.map(function(l) {
+        var col = { info:'var(--text2)', warn:'var(--warn)', error:'var(--err)', debug:'var(--text3)' }[l.level] || 'var(--text)';
+        return '<div style="display:grid;grid-template-columns:52px 44px 1fr;gap:8px;padding:5px 12px;border-bottom:1px solid var(--border)">'
+          + '<span style="color:var(--text3)">' + (l.created_at || '').slice(11,16) + '</span>'
+          + '<span style="color:' + col + '">' + l.level.toUpperCase() + '</span>'
+          + '<span style="word-break:break-all">' + esc(l.message) + (l.url ? '<span style="display:block;color:var(--text3);font-size:10px">' + esc(l.url) + '</span>' : '') + '</span>'
+          + '</div>';
+      }).join('');
+      feed.scrollTop = feed.scrollHeight;
+    }
+  };
+}
+
+// Boot
+showPage('browse');
+</script>
+</body>
+</html>
